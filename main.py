@@ -12,7 +12,6 @@ import asyncio
 from db.database import SessionLocal, engine, Base
 Base.metadata.create_all(bind=engine)
 
-
 from models.models import RawMeasurement, Alert, DeviceStatus
 from schemas.telemetry import TelemetryBatch
 
