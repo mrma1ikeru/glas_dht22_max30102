@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from fastapi import FastAPI, Depends, APIRouter
+from fastapi import FastAPI, Depends, APIRouter, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
@@ -16,20 +17,26 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-NO_DATA_TIMEOUT = int(os.getenv("NO_DATA_TIMEOUT", 60))             #конфигурация окружения
+BASE_DIR = Path(__file__).resolve().parent
+
+NO_DATA_TIMEOUT = int(os.getenv("NO_DATA_TIMEOUT", 60))
 BACKLOG_THRESHOLD = int(os.getenv("BACKLOG_THRESHOLD", 20))
 
-@asynccontextmanager                #lifespan вместо startup; написано, что эт современная вресия
+@asynccontextmanager
 async def lifespan(app: FastAPI):
-
     asyncio.create_task(check_no_data())
-
     yield
 
-app = FastAPI(lifespan=lifespan)            #инициализация апи
+app = FastAPI(lifespan=lifespan)
+
 @app.get("/")
 def root():
     return {"status": "GLAS backend running"}
+
+@app.get("/dashboard")
+def dashboard():
+    return FileResponse(BASE_DIR / "dashboard.html")
+
 telemetry_router = APIRouter()
 app.include_router(telemetry_router)
 
@@ -40,15 +47,11 @@ def get_db():           #зависимость бд
     finally:
         db.close()
 
-@app.exception_handler(RequestValidationError)          #если ошибки
-async def validation_exception_handler(exc: RequestValidationError):
-
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
         status_code=422,
-        content={
-            "error": "bad_payload",
-            "details": exc.errors()
-        }
+        content={"error": "bad_payload", "details": exc.errors()},
     )
 
 @app.get("/api/v1/devices")

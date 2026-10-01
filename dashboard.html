@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLAS — Overview</title>
+<style>
+  :root {
+    --bg: #f4f6fb; --card: #fff; --border: #e1e6f0;
+    --title: #2f4a8a; --text: #0f172a; --muted: #5b6477;
+    --ok: #15803d; --bad: #b91c1c; --warn: #b45309;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, Arial, sans-serif; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 48px 24px; }
+  .hero { background: linear-gradient(120deg, #334c8c, #4461ae); color: #fff;
+    border-radius: 22px; padding: 30px; box-shadow: 0 12px 30px rgba(51,76,140,.25); }
+  .hero h1 { margin: 0 0 12px; font-size: 36px; }
+  .hero p { margin: 4px 0; font-size: 17px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 24px 0; }
+  .card { background: var(--card); border: 1px solid var(--border);
+    border-radius: 20px; padding: 20px; min-height: 250px; }
+  .card h2 { margin: 0 0 8px; font-size: 20px; color: var(--title); }
+  .label { color: var(--muted); font-size: 15px; margin-top: 10px; }
+  .value { font-size: 26px; font-weight: 700; }
+  .value small { font-size: 16px; font-weight: 600; color: var(--muted); }
+  .online, .ok { color: var(--ok); }
+  .offline, .error { color: var(--bad); }
+  .alerts h2 { margin: 24px 0 18px; font-size: 20px; color: var(--text); }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--muted); font-size: 15px; padding: 10px 8px; border-bottom: 2px solid var(--border); }
+  td { padding: 10px 8px; border-bottom: 1px solid var(--border); }
+  .sev { font-weight: 600; }
+  .sev.critical { color: var(--bad); } .sev.warning { color: var(--warn); } .sev.info { color: var(--title); }
+  .foot { margin-top: 12px; color: var(--muted); font-size: 13px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } .card { min-height: 0; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <h1>GLAS — Overview</h1>
+    <p id="hero-meta">Сенсор: — | Устройство: — | Статус: —</p>
+  </header>
+
+  <section class="grid">
+    <div class="card">
+      <h2>DHT22 / среда</h2>
+      <div class="label">Температура воздуха</div><div class="value" id="temp">—</div>
+      <div class="label">Влажность</div><div class="value" id="hum">—</div>
+    </div>
+    <div class="card">
+      <h2>MAX30102 / пациент</h2>
+      <div class="label">HR</div><div class="value" id="hr">—</div>
+      <div class="label">SpO2</div><div class="value" id="spo2">—</div>
+    </div>
+    <div class="card">
+      <h2>Статус узлов</h2>
+      <div class="label">Arduino</div><div class="value" id="st-arduino">—</div>
+      <div class="label">Gateway</div><div class="value" id="st-gateway">—</div>
+      <div class="label">Server</div><div class="value" id="st-server">—</div>
+    </div>
+  </section>
+
+  <section class="card alerts" style="min-height:0">
+    <h2>Последние alerts</h2>
+    <table>
+      <thead><tr><th>Severity</th><th>Type</th><th>Source</th><th>Message</th><th>Время</th></tr></thead>
+      <tbody id="alerts"><tr><td colspan="5">Загрузка…</td></tr></tbody>
+    </table>
+  </section>
+  <div class="foot" id="updated"></div>
+</div>
+
+<script>
+// Тот же хост, что и бэкенд. Если открываете файл отдельно: dashboard.html?api=http://localhost:8000
+const API = new URLSearchParams(location.search).get("api") || "";
+const POLL_MS = 3000;       // как часто обновлять
+const STALE_SEC = 60;       // как NO_DATA_TIMEOUT в бэкенде
+
+const SEVERITY = { no_data: "critical", queue_backlog: "warning", high_temp_air: "warning", low_humidity: "warning" };
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num = (v, d = 1) => (v === null || v === undefined) ? "—" : Number(v).toFixed(d);
+// timestamps из БД — UTC без таймзоны
+const parseTs = s => new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s + "Z");
+
+async function get(path) {
+  const r = await fetch(API + path, { cache: "no-store" });
+  if (!r.ok) throw new Error(path + " → " + r.status);
+  return r.json();
+}
+
+function setStatus(el, text, good) {
+  el.textContent = text;
+  el.className = "value " + (good ? "online" : "offline");
+}
+
+async function refresh() {
+  try {
+    const [devices, measurements, alerts] = await Promise.all([
+      get("/api/v1/devices"), get("/api/v1/measurements"), get("/api/v1/alerts"),
+    ]);
+
+    // Измерения идут от новых к старым — берём последнее непустое значение каждого датчика
+    const lastDht = measurements.find(m => m.temp_air != null || m.humidity != null);
+    const lastMax = measurements.find(m => m.heart_rate != null || m.spo2 != null);
+    $("temp").innerHTML = lastDht && lastDht.temp_air != null ? num(lastDht.temp_air) + " <small>°C</small>" : "—";
+    $("hum").innerHTML = lastDht && lastDht.humidity != null ? num(lastDht.humidity) + " <small>%</small>" : "—";
+    $("hr").innerHTML = lastMax && lastMax.heart_rate != null ? num(lastMax.heart_rate, 0) + " <small>уд/мин</small>" : "—";
+    $("spo2").innerHTML = lastMax && lastMax.spo2 != null ? num(lastMax.spo2, 0) + " <small>%</small>" : "—";
+
+    // Статус узлов
+    const dev = devices[0];
+    const fresh = dev && dev.last_seen && (Date.now() - parseTs(dev.last_seen)) / 1000 < STALE_SEC;
+    const arduinoOk = fresh && dev.status === "online" && dev.last_payload_ok !== false;
+    setStatus($("st-arduino"), arduinoOk ? "ok" : (dev ? "no data" : "—"), arduinoOk);
+    setStatus($("st-gateway"), fresh ? "online" : "offline", fresh);
+    setStatus($("st-server"), "online", true);
+
+    $("hero-meta").textContent =
+      `Сенсор: ${lastMax && !lastDht ? "max30102" : "dht22"} | Устройство: ${dev ? dev.device_id : "—"} | Статус: ${arduinoOk ? "ok" : "no data"}`;
+
+    // Alerts
+    $("alerts").innerHTML = alerts.length
+      ? alerts.slice(0, 15).map(a => {
+          const sev = SEVERITY[a.alert_type] || "info";
+          return `<tr><td class="sev ${sev}">${sev}</td><td>${esc(a.alert_type)}</td>
+                  <td>${esc(a.device_id)}</td><td>${esc(a.message)}</td>
+                  <td>${parseTs(a.timestamp).toLocaleTimeString("ru-RU")}</td></tr>`;
+        }).join("")
+      : `<tr><td colspan="5">Активных alerts пока нет.</td></tr>`;
+
+    $("updated").textContent = "Обновлено: " + new Date().toLocaleTimeString("ru-RU");
+  } catch (e) {
+    setStatus($("st-server"), "offline", false);
+    $("updated").textContent = "Нет связи с сервером: " + e.message;
+  }
+}
+
+refresh();
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>
